@@ -1,0 +1,353 @@
+---
+title: "DSM5012_Final"
+author: "Alp ALTINÖZ"
+date: "06/07/2021"
+output: html_document
+---
+
+# **Arima vs. LSTM methods in Time Series analysis**
+
+* I will examine the monthly average copper price between 1990-2021.
+* The internet address from which I got the data (https://fred.stlouisfed.org/series/PCOPPUSDM)
+* I will first analyze the data with the Arima method, then use the LSTM method and compare the difference between the two results with performance criteria such as MAE, RSS, MSE, RMSE
+
+#### **Required Libraries**
+```{r, warning=FALSE,message=FALSE}
+library(magrittr)
+library(tidyverse)
+library(forecast)
+library(astsa)
+library(seastests)
+library(keras)
+library(tensorflow)
+library(modelr)
+library(plotly)
+library(lmtest)
+```
+
+
+#### **Getting Data**
+```{r,warning=FALSE, message=FALSE}
+cop <- read.csv("C:/Users/Dell/Downloads/coppermonthly.csv")
+str(cop)
+cop$DATE <- as.Date(cop$DATE)
+cop$PCOPPUSDM <- as.numeric(cop$PCOPPUSDM)
+sum(is.na(cop))
+```
+
+* I defined the date column of the data as date type and the price column as number type variable.
+* There are no missing observations in the data.
+
+
+#### **Creating Time Series Object**
+```{r,warning=FALSE, message=FALSE}
+tscop <- ts(cop$PCOPPUSDM, start = 1990, frequency = 12)
+tscop %>% isSeasonal()#Mevsimsel değil
+tscop %>% decompose() %>% plot()
+tscop %>% acf2()
+```
+
+* I introduced the data as a time series.
+* With the isSeasonal() command, I checked whether there is seasonality in the series, seasonality is not observed.
+* With the decompose() command, it separates the data into trend, seasonality and residual when these two components are removed.
+* As can be seen from the ACF graph, the data is not stationary, I will take the difference of the data to make it stationary.
+
+#### **Making ts stationary and ACF, PACF plots**
+```{r,warning=FALSE, message=FALSE}
+tscop %>% diff() %>% decompose() %>% plot()
+tscop %>% diff() %>% acf2()
+```
+
+* We see from the ACF and PACF graphs that the data becomes stationary after taking the difference with the diff() command.
+* There are few spikes in ACF and PACF, I will try to eliminate them by taking the logarithm of the current data.
+
+#### **ACF and PACF of logged and diffed data**
+```{r,warning=FALSE, message=FALSE}
+tscop %>% log() %>% diff() %>% decompose() %>% plot()
+tscop %>% log() %>% diff() %>% acf2()
+ltscop <- tscop %>%  log() %>% diff()
+```
+
+* The spikes mentioned above are smaller, ACF and PACF look better.
+* Since ACF graph decreases slower than PACF, ACF decays slowly and PACF 1.lagte cuts off seems to be off, but I will try other options.
+
+## **Arima trials**
+
+#### **ARIMA(1,1,0)**
+```{r,warning=FALSE, message=FALSE}
+f1 <-  arima(tscop %>% log(),order = c(1,1,0))
+coeftest(f1)
+tsdiag(f1)
+f1$aic
+```
+
+* model ar1 looks good Makes sense for model ar1, the ACF of the residuals shows that the residuals are independent. Ljung Box test results were also successful.
+* I'll try a few more models and see if the results get worse.
+
+#### **ARIMA(1,1,1)**
+```{r,warning=FALSE, message=FALSE}
+f2 <-  arima(tscop %>% log(),order = c(1,1,1))
+coeftest(f2)
+tsdiag(f2)
+f2$aic
+```
+
+* The ma1 part did not make sense for the model. I do not need to dwell on this model any longer.
+
+#### **ARIMA(2,1,0)**
+```{r,warning=FALSE, message=FALSE}
+f3 <-  arima(tscop %>% log(),order = c(2,1,0))
+f3
+coeftest(f3)
+tsdiag(f3)
+f3$aic
+```
+
+* ar2 did not make sense for this model, I do not need to examine this model further.
+* I will end my model search by seeing auto.arima's suggestion.
+
+#### **AUTO.ARIMA**
+```{r,warning=FALSE, message=FALSE}
+f4 <-  auto.arima(tscop %>% log())
+coeftest(f4)
+tsdiag(f4)
+f4$aic
+```
+
+* auto.arima recommends (2,1,0) but not statistically significant for ar2 model.
+* I chose this model because auto.arima chose the model with the lowest AIC value, but I cannot use it because ar2 is statistically significant.
+* I will continue my analysis with the (1,1,0) model.
+
+#### **Arima analysis result**
+
+* As a result of Arima analysis, I decided that the appropriate model is ARIMA(1,1,0).
+* Since I use log transform data in the analysis, I will need to undo this conversion in the results.
+
+## **LSTM**
+
+* I will try to analyze the data using the artificial neural networks method.
+* Since the LSTM method is a supervised learning method, we need to create a data set with a dependent variable. We will define this as the dependent variable 1.lag and the independent variable as the 2.lag.
+
+#### **Preparing data for Supervised Learning**
+```{r,warning=FALSE, message=FALSE}
+diff <- tscop %>% diff()
+
+dates <- cop$DATE[2:nrow(cop)]
+supervised <- as.data.frame(cbind(stats::lag(diff,1), diff))
+supervised[is.na(supervised)] <- 0
+head(supervised)
+
+```
+
+* I created my dataset in the supervised variable
+* Since I will use supervised learning method, I will divide the data into 70% train and 30% test.
+
+
+#### **Train Test Split**
+```{r,warning=FALSE, message=FALSE}
+N <- nrow(supervised)
+n_ <- round(N*0.7, digits = 0)
+
+train <- supervised[1:n_,]
+test <- supervised[(n_+1):N,]
+train_date <- dates[1:n_]
+test_date <- dates[(n_+1):N]
+```
+
+
+* Since it is time series analysis, I cannot separate the data in classical supervised learning methods as random train or test. I separate the first 70% of the data as a train and the last 30% as a test.
+
+
+#### **Normalization**
+```{r,warning=FALSE, message=FALSE}
+scale_data <- function(train,test,feature_range = c(0,1)){
+  x = train
+  fr_min = feature_range[1]
+  fr_max = feature_range[2]
+  std_train = (x - min(x)) / (max(x)-min(x))
+  std_test = (test - min(x)) / ( max(x) - min(x))
+  scaled_train = std_train * (fr_max-fr_min ) + fr_min
+  scaled_test = std_test * (fr_max-fr_min) + fr_min
+  
+  return(list(scaled_train = as.vector(scaled_train), scaled_test = as.vector(scaled_test), scaler = c(min=min(x), max=max(x))))
+}
+
+```
+
+* We use the above function to normalize the data.
+* After estimating the normalized data, we will use the code below to convert it to its original scale.
+
+#### **Reverse the normalization process**
+```{r,warning=FALSE, message=FALSE}
+reverse_scaling <- function(scaled, scaler, feature_range = c(0,1)){
+  min = scaler[1]
+  max = scaler[2]
+  t = length(scaled)
+  mins = feature_range[1]
+  maxs = feature_range[2]
+  inverted_dfs = numeric(t)
+  
+  for(i in 1:t){
+    X = (scaled[i] - mins) / (maxs-mins)
+    rawValues = X * (max - min) + min
+    inverted_dfs[i] = rawValues
+  }
+  return(inverted_dfs)
+}
+
+```
+
+#### **Scaling and splitting data to train and test **
+```{r,warning=FALSE, message=FALSE}
+Scaled <- scale_data(train, test, c(-1,1))
+y_train <- Scaled$scaled_train[,2]
+x_train <- Scaled$scaled_train[,1]
+y_test <- Scaled$scaled_test[,2]
+x_test <- Scaled$scaled_test[,1]
+```
+
+
+#### **LSTM Model**
+```{r,warning=FALSE, message=FALSE}
+dim(x_train) <- c(length(x_train),1,1)
+x_shape2 <- dim(x_train)[2]
+x_shape3 <- dim(x_train)[3]
+batch_size <- 1
+units <- 1
+
+model <- keras_model_sequential()
+model %>% 
+  layer_lstm(units, batch_input_shape = c(batch_size, x_shape2, x_shape3), stateful = TRUE) %>% 
+  layer_dense(units = 1)
+
+```
+
+#### **Creating the LSTM Model Layer**
+
+* Mean Squarred Error is used as the Loss function.
+* Deep learning applications are actually an optimization problem. Adam Optimizer algorithm was used as the optimization algorithm.
+* Accuracy was used as a measure of classification success.
+* Epochs, number of repetitions set at 50.
+* Running the model and its function has been optimized 50 times.
+
+
+```{r,warning=FALSE, message=FALSE}
+model %>% 
+  compile(loss = "mean_squared_error",
+          optimizer =  optimizer_adam(lr = 0.03, decay = 1e-6),
+          metrics = c("accuracy")
+          )
+Epochs = 50
+
+```
+
+
+#### **Run Model**
+
+* Since the model will print out 50 times, I keep the printouts
+```{r,results="HIDE",warning=FALSE, message=FALSE}
+for(i in 1:Epochs){
+  model %>%  fit(x_train, y_train, epochs = 1, batch_size = batch_size, verbose = 1, shuffle = FALSE)
+  model %>% reset_states()
+}
+```
+
+
+#### **Converting Forecast Values to Original Scale**
+
+```{r,warning=FALSE, message=FALSE}
+#Predictions
+L = length(x_test)
+scaler = Scaled$scaler
+predictions = numeric(L)
+Series = cop$PCOPPUSDM
+
+for(i in 1:L){
+  X = x_test[i]
+  dim(X) = c(1,1,1)
+  yhat = model %>% predict(X, batch_size=batch_size)
+  #invert scaling
+  yhat = reverse_scaling(yhat, scaler, c(-1,1))
+  #invert differencing
+  yhat = yhat + Series[(n_+i)]
+  #store
+  predictions[i] <- yhat
+}
+
+predictions
+
+```
+
+
+#### **Results**
+
+* Creating a data table containing the predicted values we obtained with the Arima and LSTM models.
+* Creating a function that calculates an MAE, RSS, MSE, RMSE values in the data table I created.
+* I will visualize the analysis graphically.
+* I will obtain the MAE, RSS, MSE, RMSE values that we obtained with the Arima and LSTM models.
+
+```{r,warning=FALSE, message=FALSE}
+#Orjinal Değerler: Datanın son 30%'luk test için ayırdığımız kısmı
+head(cop$PCOPPUSDM[(n_+1):N])
+
+#Arima Değerleri: Orjinal değerlerin arima modeli ile tahminleri
+f1 <-  arima(tscop %>% log(),order = c(1,1,0))
+arima_preds <- exp(fitted(f1))
+
+#LSTM değerleri: Orjinal değerlerin arima modeli ile tahminleri
+head(predictions)
+```
+
+
+#### **Creating Data Table**
+
+```{r,warning=FALSE, message=FALSE}
+sonuc <- data.frame("Tarih" = cop$DATE[(n_+1):N],
+                    "Asil" = cop$PCOPPUSDM[(n_+1):N], 
+                    "Arima" = round(exp(fitted(f1)[(n_+1):N])), 
+                    "LSTM" = predictions)
+head(sonuc)
+```
+
+
+#### **Visualization**
+
+```{r,warning=FALSE, message=FALSE}
+sonucplot <- 
+  sonuc %>% 
+  plot_ly(x = ~Tarih) %>% 
+  add_trace(y = ~Asil, type ="scatter", mode = "markers", name = "Asil") %>% 
+  add_trace(y = ~Arima, type ="scatter", mode = "lines", name = "Arima") %>% 
+  add_trace(y = ~LSTM, type ="scatter", mode = "lines", name = "LSTM") %>% 
+  layout(title = "Asıl - Arima - LSTM",
+         yaxis = list(title = "Bakır Fiyatı"))
+sonucplot 
+
+```
+
+* The LSTM estimates (green) appear to be closer to the original values, although the Arima (orange) is closer
+
+#### **Calculation of Estimation Errors**
+
+* I will calculate MAE, RSS, MSE, RMSE values
+
+```{r,warning=FALSE, message=FALSE}
+getPerformance = function(pred, val) {
+  res = pred - val
+  MAE = sum(abs(res))/length(val)#Mean Average Error
+  RSS = sum(res^2)#Residual Sum Squares
+  MSE = RSS/length(val)#Mean Squared Error
+  RMSE = sqrt(MSE)#Root Mean Square Error
+  perf = data.frame(MAE, RSS, MSE, RMSE)
+  return(perf)
+}
+
+getPerformance(sonuc$Arima, sonuc$Asil)
+getPerformance(sonuc$LSTM, sonuc$Asil)
+performans <- rbind("Arima" = getPerformance(sonuc$Arima, sonuc$Asil), 
+                    "LSTM" = getPerformance(sonuc$LSTM, sonuc$Asil))
+performans
+
+```
+
+* LSTM performed better than Arima model on all predictive measures
